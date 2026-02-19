@@ -97,3 +97,41 @@ def handle_component_update(payload: ComponentUpdate) -> None:
     if comp.updated_at:
         logger.info("  At       : %s", comp.updated_at.isoformat())
     logger.info(separator)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard formatters — produce a flat dict for the SSE / event log
+# ---------------------------------------------------------------------------
+
+def format_incident_event(payload: IncidentPayload) -> dict:
+    """Flatten an incident into a JSON-serialisable dict for the dashboard."""
+    inc = payload.incident
+    latest_body = inc.incident_updates[0].body if inc.incident_updates else ""
+    affected = ", ".join(c.name for c in inc.components) if inc.components else ""
+    return {
+        "type": "incident",
+        "name": inc.name,
+        "status": inc.status,
+        "impact": inc.impact,
+        "affected": affected,
+        "update_body": latest_body,
+        "shortlink": inc.shortlink or "",
+        "timestamp": (inc.updated_at or inc.created_at).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    }
+
+
+def format_component_event(payload: ComponentUpdate) -> dict:
+    """Flatten a component update into a JSON-serialisable dict for the dashboard."""
+    comp = payload.component
+    old_s = payload.component_update.get("old_status", "unknown") if payload.component_update else "unknown"
+    new_s = payload.component_update.get("new_status", comp.status) if payload.component_update else comp.status
+    old_icon = COMPONENT_EMOJI.get(old_s, "⚪")
+    new_icon = COMPONENT_EMOJI.get(new_s, "⚪")
+    return {
+        "type": "component",
+        "name": comp.name,
+        "status": new_s,
+        "new_status": new_s,
+        "transition": f"{old_icon} {old_s}  →  {new_icon} {new_s}",
+        "timestamp": comp.updated_at.strftime("%Y-%m-%d %H:%M:%S UTC") if comp.updated_at else "—",
+    }
