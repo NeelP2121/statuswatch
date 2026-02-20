@@ -1,7 +1,9 @@
 import asyncio
 import aiohttp
+from aiohttp import web
 import json
 from datetime import datetime
+import os
 
 class StatusTracker:
     def __init__(self, polling_interval=60, config_file="config.json"):
@@ -17,25 +19,33 @@ class StatusTracker:
         self.polling_interval = polling_interval
         
         # State tracking
-        # For components: component_id -> previous state dict
         self.component_states = {}
-        # For incidents: incident_id -> last update timestamp string or list of update ids
         self.incident_states = {}
         self.known_incident_updates = set()
+        
+        # New: Store recent logs in memory to display on the web!
+        self.recent_logs = []
 
-    def print_event(self, product, status, timestamp=None):
+    def add_log(self, message):
+        """Helper to print to console AND store in our recent_logs list"""
+        print(message)
+        self.recent_logs.insert(0, message) # Add to the top
+        # Keep only the last 50 logs so we don't run out of memory
+        if len(self.recent_logs) > 50:
+            self.recent_logs.pop()
+
+    def record_event(self, product, status, timestamp=None):
         if not timestamp:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         else:
             try:
-                # Parse standard ISO format "2023-01-01T12:00:00.000Z"
                 dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
                 timestamp = dt.strftime('%Y-%m-%d %H:%M:%S')
             except ValueError:
                 pass
                 
-        print(f"[{timestamp}] Product: {product}")
-        print(f"Status: {status}\n")
+        log_message = f"[{timestamp}] Product: {product} | Status: {status}"
+        self.add_log(log_message)
 
     async def fetch_status(self, session, url):
         try:
@@ -43,17 +53,15 @@ class StatusTracker:
                 if response.status == 200:
                     return await response.json()
         except Exception as e:
-            print(f"Error fetching {url}: {e}")
+            self.add_log(f"Error fetching {url}: {e}")
         return None
 
     def process_data(self, source_name, data):
-        # 0. Print initial overall status on startup
         if not self.initialized and "status" in data:
             desc = data["status"].get("description", "Unknown")
             indicator = data["status"].get("indicator", "none")
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {source_name} Current Status: {desc} (Indicator: {indicator})\n")
+            self.add_log(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {source_name} Current Status: {desc} (Indicator: {indicator})")
 
-        # 1. Check components for status changes
         if "components" in data:
             for comp in data["components"]:
                 comp_id = comp["id"]
@@ -63,16 +71,13 @@ class StatusTracker:
                 if comp_id in self.component_states:
                     prev_status = self.component_states[comp_id]
                     if prev_status != status:
-                        # State changed! Emit event.
-                        self.print_event(
+                        self.record_event(
                             product=f"{source_name} - {comp_name}",
-                            status=f"Status changed from '{prev_status}' to '{status}'",
+                            status=f"Changed from '{prev_status}' to '{status}'",
                             timestamp=comp.get("updated_at")
                         )
-                # Update state
                 self.component_states[comp_id] = status
                 
-        # 2. Check active incidents for new updates
         if "incidents" in data:
             for incident in data["incidents"]:
                 inc_id = incident["id"]
@@ -83,12 +88,9 @@ class StatusTracker:
                     update_id = update["id"]
                     if update_id not in self.known_incident_updates:
                         self.known_incident_updates.add(update_id)
-                        
-                        # Note: We probably don't want to print historical updates on startup
-                        # We'll skip printing if this is the first time we're seeing this incident update during initialization
                         if self.initialized:
                             body = update.get("body", "No description")
-                            self.print_event(
+                            self.record_event(
                                 product=f"{source_name} Incident: {inc_name}",
                                 status=body,
                                 timestamp=update.get("created_at")
@@ -96,8 +98,9 @@ class StatusTracker:
                 
                 self.incident_states[inc_id] = incident.get("updated_at")
 
-    async def track(self):
-        print(f"Starting async Status Tracker (interval: {self.polling_interval}s)...")
+    async def track_loop(self):
+        """The background task that polls for status updates constantly"""
+        self.add_log(f"Starting async Status Tracker (interval: {self.polling_interval}s)...")
         self.initialized = False
         
         async with aiohttp.ClientSession() as session:
@@ -109,13 +112,40 @@ class StatusTracker:
                     if data:
                         self.process_data(source["name"], data)
                         
-                # After the first successful loop, mark as initialized to only trigger ON NEW events
                 self.initialized = True
                 await asyncio.sleep(self.polling_interval)
 
-if __name__ == "__main__":
+    async def handle_web_request(self, request):
+        """Serves the logs as a simple HTML page"""
+        html = "<html><head><title>Status Tracker Logs</title></head><body style='font-family: monospace;'>"
+        html += "<h2>Recent Status Events</h2>"
+        html += "<ul>"
+        for log in self.recent_logs:
+            html += f"<li>{log}</li>"
+        html += "</ul></body></html>"
+        return web.Response(text=html, content_type='text/html')
+
+async def main():
     tracker = StatusTracker(polling_interval=30)
+    
+    # 1. Setup Web Server
+    app = web.Application()
+    app.router.add_get('/', tracker.handle_web_request)
+    
+    # Use Railway's provided PORT or default to 8080
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    tracker.add_log(f"Web server started on port {port}...")
+
+    # 2. Start the tracking loop concurrently
+    await tracker.track_loop()
+
+if __name__ == "__main__":
     try:
-        asyncio.run(tracker.track())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nTracker stopped.")
