@@ -1,0 +1,8 @@
+{
+  "sources": [
+    {
+      "name": "OpenAI",
+      "url": "https://status.openai.com/api/v2/summary.json"
+    }
+  ]
+}
