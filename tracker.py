@@ -89,10 +89,15 @@ class StatusTracker:
                     if update_id not in self.known_incident_updates:
                         self.known_incident_updates.add(update_id)
                         if self.initialized:
-                            body = update.get("body", "No description")
+                            body = update.get("body", "")
+                            status_val = update.get("status", "updated")
+                            
+                            # Often the body is an empty string, so display the status step instead
+                            display_text = body if body else f"Status updated to: {status_val}"
+                            
                             self.record_event(
                                 product=f"{source_name} Incident: {inc_name}",
-                                status=body,
+                                status=display_text,
                                 timestamp=update.get("created_at")
                             )
                 
